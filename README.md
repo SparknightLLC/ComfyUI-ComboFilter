@@ -1,4 +1,4 @@
-# ComfyUI Combo Filter
+# ComfyUI-ComboFilter
 
 Frontend-only ComfyUI extension that filters `COMBO` dropdown values with ordered whitelist and blacklist rules.
 
