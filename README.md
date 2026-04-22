@@ -2,7 +2,7 @@
 
 Frontend-only ComfyUI extension that filters `COMBO` dropdown values with ordered whitelist and blacklist rules.
 
-The goal is improving the UX for frequently-accessed lists, such as `sampler_name`, which may contain numerous entries you may have no interest in.
+The goal is improving the UX for frequently-accessed lists, such as `sampler_name`, which contains numerous entries you may have no interest in.
 
 ## What It Does
 
