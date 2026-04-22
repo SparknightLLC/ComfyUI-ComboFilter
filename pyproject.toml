@@ -2,7 +2,7 @@
 [project]
 name = "comfyui-combofilter" # immutable
 description = "Frontend-only extension that filters COMBO dropdown values with ordered whitelist and blacklist rules."
-version = "0.0.1"
+version = "0.0.2"
 license = { file = "LICENSE" }
 dependencies = []
 

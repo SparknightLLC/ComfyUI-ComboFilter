@@ -1,4 +1,4 @@
-import { app } from "../../../scripts/app.js";
+import { app } from "/scripts/app.js";
 
 const EXTENSION_NAME = "comfy.combo_filter";
 const SETTINGS_PANEL_LABEL = "Combo Filter";
@@ -7,6 +7,8 @@ const SETTINGS_INSTALL_FLAG = "__combo_filter_settings_installed";
 const PATCH_RETRY_FLAG = "__combo_filter_retry_started";
 const RETRY_INTERVAL_MS = 500;
 const MAX_RETRY_COUNT = 240;
+const GRAPH_REFRESH_ATTEMPTS = 20;
+const GRAPH_REFRESH_DELAY_MS = 75;
 
 const SETTING_IDS = {
 	enabled: "combo_filter.enabled",
@@ -54,9 +56,20 @@ const state = {
 	patch_retry_count: 0,
 };
 
+let graph_refresh_token = 0;
+let load_graph_hook_installed = false;
+
 function build_setting_category(label)
 {
 	return [SETTINGS_PANEL_LABEL, SETTINGS_SECTION_LABEL, label];
+}
+
+function get_registered_node_types()
+{
+	const registered_node_types = globalThis?.LiteGraph?.registered_node_types;
+	return registered_node_types && typeof registered_node_types === "object"
+		? Object.values(registered_node_types)
+		: [];
 }
 
 function load_local_setting(key, fallback)
@@ -162,6 +175,26 @@ function is_plain_object(value)
 function clone_values(values)
 {
 	return Array.isArray(values) ? values.slice() : [];
+}
+
+function get_widget_array_values(widget)
+{
+	if (Array.isArray(widget?.values))
+	{
+		return clone_values(widget.values);
+	}
+
+	return clone_values(widget?.options?.values);
+}
+
+function get_resolved_widget_values(widget)
+{
+	if (Array.isArray(widget?.__combo_filter_resolved_values))
+	{
+		return clone_values(widget.__combo_filter_resolved_values);
+	}
+
+	return get_widget_array_values(widget);
 }
 
 function unique_values(values)
@@ -529,7 +562,7 @@ function capture_original_values(widget)
 
 	if (!Array.isArray(widget.__combo_filter_original_values))
 	{
-		widget.__combo_filter_original_values = clone_values(widget?.options?.values);
+		widget.__combo_filter_original_values = get_widget_array_values(widget);
 	}
 
 	return clone_values(widget.__combo_filter_original_values);
@@ -556,14 +589,13 @@ function get_property_descriptor_info(target, property_name)
 	return null;
 }
 
-function set_widget_values(widget, values)
+function set_widget_option_values(widget, next_option_values)
 {
 	if (!widget)
 	{
 		return false;
 	}
 
-	const cloned_values = clone_values(values);
 	const widget_options = widget.options || {};
 	widget.options = widget_options;
 
@@ -575,8 +607,8 @@ function set_widget_values(widget, values)
 			|| descriptor_info.descriptor.writable
 			|| typeof descriptor_info.descriptor.set === "function")
 		{
-			widget_options.values = cloned_values;
-			return true;
+			widget_options.values = next_option_values;
+			return widget?.options?.values === next_option_values;
 		}
 	}
 	catch (error)
@@ -591,9 +623,9 @@ function set_widget_values(widget, values)
 				configurable: true,
 				enumerable: true,
 				writable: true,
-				value: cloned_values,
+				value: next_option_values,
 			});
-			return true;
+			return widget?.options?.values === next_option_values;
 		}
 	}
 	catch (error)
@@ -611,11 +643,11 @@ function set_widget_values(widget, values)
 			configurable: true,
 			enumerable: true,
 			writable: true,
-			value: cloned_values,
+			value: next_option_values,
 		});
 
 		widget.options = replacement_options;
-		return Array.isArray(widget?.options?.values);
+		return widget?.options?.values === next_option_values;
 	}
 	catch (error)
 	{
@@ -631,6 +663,25 @@ function set_widget_values(widget, values)
 	}
 
 	return false;
+}
+
+function set_widget_values(widget, values)
+{
+	if (!widget)
+	{
+		return false;
+	}
+
+	const cloned_values = clone_values(values);
+	widget.__combo_filter_resolved_values = cloned_values;
+	widget.values = clone_values(cloned_values);
+
+	if (widget.__combo_filter_dynamic_values_bound && typeof widget?.options?.values === "function")
+	{
+		return true;
+	}
+
+	return set_widget_option_values(widget, cloned_values);
 }
 
 function get_node_name(node)
@@ -750,6 +801,31 @@ function refresh_combo_widget(node, widget)
 	return set_widget_values(widget, next_values);
 }
 
+function bind_dynamic_widget_values(node, widget)
+{
+	if (!is_combo_widget(widget) || widget.__combo_filter_dynamic_values_bound)
+	{
+		return false;
+	}
+
+	const values_resolver = function(widget_instance, node_instance)
+	{
+		const target_widget = widget_instance || this || widget;
+		const target_node = node_instance || node || target_widget?.node;
+
+		refresh_combo_widget(target_node, target_widget);
+		return get_resolved_widget_values(target_widget);
+	};
+
+	if (!set_widget_option_values(widget, values_resolver))
+	{
+		return false;
+	}
+
+	widget.__combo_filter_dynamic_values_bound = true;
+	return true;
+}
+
 function patch_combo_widget(node, widget)
 {
 	if (!is_combo_widget(widget))
@@ -758,6 +834,7 @@ function patch_combo_widget(node, widget)
 	}
 
 	refresh_combo_widget(node, widget);
+	bind_dynamic_widget_values(node, widget);
 
 	if (widget.__combo_filter_patched)
 	{
@@ -828,7 +905,6 @@ function refresh_all_combo_widgets()
 	const graph_candidates = [
 		app?.graph,
 		app?.canvas?.graph,
-		app?.rootGraph,
 	];
 
 	for (const graph of graph_candidates)
@@ -858,6 +934,7 @@ function stop_patch_retry_loop()
 		state.patch_retry_timer = null;
 	}
 
+	state[PATCH_RETRY_FLAG] = false;
 	state.patch_retry_count = 0;
 }
 
@@ -873,11 +950,58 @@ function start_patch_retry_loop()
 	state.patch_retry_timer = setInterval(() =>
 	{
 		state.patch_retry_count += 1;
-		if (refresh_all_combo_widgets() || state.patch_retry_count >= MAX_RETRY_COUNT)
+		refresh_all_combo_widgets();
+
+		if (state.patch_retry_count >= MAX_RETRY_COUNT)
 		{
 			stop_patch_retry_loop();
 		}
 	}, RETRY_INTERVAL_MS);
+}
+
+function schedule_combo_widget_refreshes(attempts = GRAPH_REFRESH_ATTEMPTS)
+{
+	graph_refresh_token += 1;
+	const current_token = graph_refresh_token;
+
+	const run_refresh = (remaining_attempts) =>
+	{
+		if (current_token !== graph_refresh_token)
+		{
+			return;
+		}
+
+		refresh_all_combo_widgets();
+
+		if (remaining_attempts > 1)
+		{
+			setTimeout(() =>
+			{
+				run_refresh(remaining_attempts - 1);
+			}, GRAPH_REFRESH_DELAY_MS);
+		}
+	};
+
+	run_refresh(Math.max(1, attempts));
+}
+
+function install_load_graph_hook()
+{
+	if (load_graph_hook_installed || typeof app?.loadGraphData !== "function")
+	{
+		return;
+	}
+
+	const original_load_graph_data = app.loadGraphData;
+	app.loadGraphData = async function()
+	{
+		const result = await original_load_graph_data.apply(this, arguments);
+		schedule_combo_widget_refreshes();
+		start_patch_retry_loop();
+		return result;
+	};
+
+	load_graph_hook_installed = true;
 }
 
 function apply_rules_json(next_rules_json)
@@ -1238,6 +1362,14 @@ function install_node_hooks(node_type)
 	};
 }
 
+function install_existing_node_hooks()
+{
+	for (const node_type of get_registered_node_types())
+	{
+		install_node_hooks(node_type);
+	}
+}
+
 app.registerExtension({
 	name: EXTENSION_NAME,
 	async setup()
@@ -1261,6 +1393,9 @@ app.registerExtension({
 		};
 
 		attempt_install();
+		install_load_graph_hook();
+		install_existing_node_hooks();
+		schedule_combo_widget_refreshes();
 		start_patch_retry_loop();
 	},
 	async beforeRegisterNodeDef(node_type, node_data)
