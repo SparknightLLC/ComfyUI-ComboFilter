@@ -27,13 +27,24 @@ Use the `Edit Filter Rules` button to manage the JSON rules.
 [
 	{
 		"enabled": true,
+		"widget_name": "control_after_generate",
+		"mode": "whitelist",
+		"syntax": "wildcard",
+		"patterns": [
+			"fixed"
+		],
+		"keep_current_value": true
+	},
+	{
+		"enabled": true,
 		"widget_name": "sampler_name",
 		"node_name": "*",
 		"mode": "whitelist",
 		"syntax": "wildcard",
 		"patterns": [
 			"euler*",
-			"lcm*"
+			"lcm*",
+			"ddim"
 		],
 		"keep_current_value": true
 	},
@@ -45,7 +56,20 @@ Use the `Edit Filter Rules` button to manage the JSON rules.
 		"patterns": [
 			"normal",
 			"simple",
-			"beta"
+			"beta",
+			"punch*",
+			"kl_optimal"
+		],
+		"keep_current_value": true
+	},
+	{
+		"enabled": false,
+		"widget_name": "unet_name",
+		"node_name": "UnetLoader*",
+		"mode": "blacklist",
+		"syntax": "wildcard",
+		"patterns": [
+			"flux*experimental*"
 		],
 		"keep_current_value": true
 	}

@@ -1,4 +1,5 @@
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const EXTENSION_NAME = "comfy.combo_filter";
 const SETTINGS_PANEL_LABEL = "Combo Filter";
@@ -19,12 +20,23 @@ const SETTING_IDS = {
 const DEFAULT_RULES = [
 	{
 		enabled: true,
+		widget_name: "control_after_generate",
+		mode: "whitelist",
+		syntax: "wildcard",
+		patterns: [
+			"fixed"
+		],
+		keep_current_value: true
+	},
+	{
+		enabled: true,
 		widget_name: "sampler_name",
 		mode: "whitelist",
 		syntax: "wildcard",
 		patterns: [
 			"euler*",
-			"lcm*"
+			"lcm*",
+			"ddim"
 		],
 		keep_current_value: true
 	},
@@ -36,7 +48,20 @@ const DEFAULT_RULES = [
 		patterns: [
 			"normal",
 			"simple",
-			"beta"
+			"beta",
+			"punch*",
+			"kl_optimal"
+		],
+		keep_current_value: true
+	},
+	{
+		enabled: false,
+		widget_name: "unet_name",
+		node_name: "UnetLoader*",
+		mode: "blacklist",
+		syntax: "wildcard",
+		patterns: [
+			"flux*experimental*"
 		],
 		keep_current_value: true
 	}
@@ -95,9 +120,11 @@ function save_local_setting(key, value)
 	try
 	{
 		localStorage.setItem(key, JSON.stringify(value));
+		return true;
 	}
 	catch (error)
 	{
+		return false;
 	}
 }
 
@@ -118,6 +145,20 @@ function get_settings_access()
 				const value = extension_setting.get(id);
 				return value === undefined ? fallback : value;
 			},
+			set: (id, value) =>
+			{
+				if (typeof extension_setting.set === "function")
+				{
+					return extension_setting.set(id, value);
+				}
+
+				if (typeof extension_setting.setValue === "function")
+				{
+					return extension_setting.setValue(id, value);
+				}
+
+				return false;
+			},
 			add_setting: app?.ui?.settings?.addSetting?.bind(app.ui.settings) ?? null,
 		};
 	}
@@ -136,11 +177,80 @@ function get_settings_access()
 
 				return ui_settings.getSettingValue(id, fallback);
 			},
+			set: (id, value) =>
+			{
+				if (typeof ui_settings.setSettingValue === "function")
+				{
+					return ui_settings.setSettingValue(id, value);
+				}
+
+				if (typeof ui_settings.setSetting === "function")
+				{
+					return ui_settings.setSetting(id, value);
+				}
+
+				return false;
+			},
 			add_setting: ui_settings.addSetting?.bind(ui_settings) ?? null,
 		};
 	}
 
 	return null;
+}
+
+async function persist_setting(key, value)
+{
+	const local_saved = save_local_setting(key, value);
+	let remote_saved = false;
+	const settings_access = state.settings_access ?? get_settings_access();
+
+	if (typeof settings_access?.set === "function")
+	{
+		try
+		{
+			const result = await settings_access.set(key, value);
+			remote_saved = result !== false;
+		}
+		catch (error)
+		{
+			console.warn(`[combo_filter] Unable to save setting "${key}" through ComfyUI settings.`, error);
+		}
+	}
+
+	if (typeof api?.storeSetting === "function")
+	{
+		try
+		{
+			const response = await api.storeSetting(key, value);
+			remote_saved = response?.ok !== false || remote_saved;
+		}
+		catch (error)
+		{
+			console.warn(`[combo_filter] Unable to save setting "${key}" through ComfyUI API.`, error);
+		}
+	}
+
+	if (!remote_saved && typeof api?.fetchApi === "function")
+	{
+		try
+		{
+			const response = await api.fetchApi(`/settings/${encodeURIComponent(key)}`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(value),
+			});
+
+			remote_saved = response?.ok !== false;
+		}
+		catch (error)
+		{
+			console.warn(`[combo_filter] Unable to save setting "${key}" through the settings endpoint.`, error);
+		}
+	}
+
+	return local_saved || remote_saved;
 }
 
 function request_canvas_redraw()
@@ -432,6 +542,12 @@ function parse_inline_regex(value, case_sensitive)
 	}
 }
 
+function regex_matches(regex, value)
+{
+	regex.lastIndex = 0;
+	return regex.test(String(value ?? ""));
+}
+
 function build_matcher(pattern, syntax, case_sensitive)
 {
 	if (pattern === null || pattern === undefined)
@@ -447,14 +563,14 @@ function build_matcher(pattern, syntax, case_sensitive)
 		const inline_regex = parse_inline_regex(pattern_text, case_sensitive);
 		if (inline_regex)
 		{
-			return (value) => inline_regex.test(String(value ?? ""));
+			return (value) => regex_matches(inline_regex, value);
 		}
 
 		let regex_flags = case_sensitive ? "" : "i";
 		try
 		{
 			const regex = new RegExp(pattern_text, regex_flags);
-			return (value) => regex.test(String(value ?? ""));
+			return (value) => regex_matches(regex, value);
 		}
 		catch (error)
 		{
@@ -477,7 +593,7 @@ function build_matcher(pattern, syntax, case_sensitive)
 	const regex_source = build_wildcard_regex_source(pattern_text);
 	const regex_flags = case_sensitive ? "" : "i";
 	const regex = new RegExp(regex_source, regex_flags);
-	return (value) => regex.test(String(value ?? ""));
+	return (value) => regex_matches(regex, value);
 }
 
 function build_selector_matchers(selector)
@@ -502,14 +618,14 @@ function build_selector_matchers(selector)
 		const inline_regex = parse_inline_regex(selector_text, false);
 		if (inline_regex)
 		{
-			selector_matchers.push((value) => inline_regex.test(String(value ?? "")));
+			selector_matchers.push((value) => regex_matches(inline_regex, value));
 			continue;
 		}
 
 		if (selector_text.includes("*") || selector_text.includes("?"))
 		{
 			const regex = new RegExp(build_wildcard_regex_source(selector_text), "i");
-			selector_matchers.push((value) => regex.test(String(value ?? "")));
+			selector_matchers.push((value) => regex_matches(regex, value));
 			continue;
 		}
 
@@ -1004,14 +1120,19 @@ function install_load_graph_hook()
 	load_graph_hook_installed = true;
 }
 
-function apply_rules_json(next_rules_json)
+async function apply_rules_json(next_rules_json)
 {
 	const parsed_rules = parse_rules_json(next_rules_json);
 	state.rules_json = parsed_rules.pretty_json;
 	state.rules = parsed_rules.rules;
 	state.rules_error = null;
 
-	save_local_setting(SETTING_IDS.rules_json, state.rules_json);
+	const saved = await persist_setting(SETTING_IDS.rules_json, state.rules_json);
+	if (!saved)
+	{
+		throw new Error("Rules were applied, but ComfyUI could not persist the rules setting.");
+	}
+
 	update_manage_rule_summary();
 	refresh_all_combo_widgets();
 }
@@ -1204,11 +1325,12 @@ function show_rules_dialog()
 	const save_button = document.createElement("button");
 	save_button.className = "comfy-btn";
 	save_button.textContent = "Save";
-	save_button.onclick = () =>
+	save_button.onclick = async () =>
 	{
 		try
 		{
-			apply_rules_json(textarea.value);
+			set_status("Saving rules.");
+			await apply_rules_json(textarea.value);
 			set_status("Rules saved.");
 			close_dialog();
 		}
@@ -1285,6 +1407,8 @@ function install_settings()
 		return false;
 	}
 
+	load_state();
+
 	app.ui.settings[SETTINGS_INSTALL_FLAG] = true;
 
 	state.settings_access.add_setting({
@@ -1296,7 +1420,7 @@ function install_settings()
 		onChange: (new_value) =>
 		{
 			state.enabled = normalize_enabled(new_value);
-			save_local_setting(SETTING_IDS.enabled, state.enabled);
+			persist_setting(SETTING_IDS.enabled, state.enabled);
 			refresh_all_combo_widgets();
 		}
 	});
