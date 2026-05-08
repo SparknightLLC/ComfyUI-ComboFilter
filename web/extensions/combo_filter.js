@@ -669,6 +669,68 @@ function is_combo_widget(widget)
 	return false;
 }
 
+function has_upload_flags(target)
+{
+	if (!target || typeof target !== "object")
+	{
+		return false;
+	}
+
+	return target.image_upload === true
+		|| target.audio_upload === true
+		|| target.video_upload === true;
+}
+
+function get_widget_input_definition(node, widget_name)
+{
+	if (!node || !widget_name)
+	{
+		return null;
+	}
+
+	const node_data = node?.constructor?.nodeData ?? node?.nodeData;
+	const required_inputs = node_data?.input?.required;
+	const optional_inputs = node_data?.input?.optional;
+
+	if (required_inputs && widget_name in required_inputs)
+	{
+		return required_inputs[widget_name];
+	}
+
+	if (optional_inputs && widget_name in optional_inputs)
+	{
+		return optional_inputs[widget_name];
+	}
+
+	return null;
+}
+
+function is_upload_combo_widget(node, widget)
+{
+	if (!widget)
+	{
+		return false;
+	}
+
+	if (widget.__combo_filter_upload_combo === true)
+	{
+		return true;
+	}
+
+	if (has_upload_flags(widget?.options))
+	{
+		return true;
+	}
+
+	const input_definition = get_widget_input_definition(node, widget?.name);
+	if (!Array.isArray(input_definition))
+	{
+		return false;
+	}
+
+	return has_upload_flags(input_definition[1]);
+}
+
 function capture_original_values(widget)
 {
 	if (!widget)
@@ -792,7 +854,9 @@ function set_widget_values(widget, values)
 	widget.__combo_filter_resolved_values = cloned_values;
 	widget.values = clone_values(cloned_values);
 
-	if (widget.__combo_filter_dynamic_values_bound && typeof widget?.options?.values === "function")
+	if (widget.__combo_filter_dynamic_values_bound
+		&& typeof widget?.options?.values === "function"
+		&& !is_upload_combo_widget(null, widget))
 	{
 		return true;
 	}
@@ -919,7 +983,9 @@ function refresh_combo_widget(node, widget)
 
 function bind_dynamic_widget_values(node, widget)
 {
-	if (!is_combo_widget(widget) || widget.__combo_filter_dynamic_values_bound)
+	if (!is_combo_widget(widget)
+		|| widget.__combo_filter_dynamic_values_bound
+		|| is_upload_combo_widget(node, widget))
 	{
 		return false;
 	}
@@ -948,6 +1014,8 @@ function patch_combo_widget(node, widget)
 	{
 		return false;
 	}
+
+	widget.__combo_filter_upload_combo = is_upload_combo_widget(node, widget);
 
 	refresh_combo_widget(node, widget);
 	bind_dynamic_widget_values(node, widget);
